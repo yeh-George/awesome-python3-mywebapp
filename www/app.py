@@ -15,6 +15,10 @@ from jinja2 import Environment, FileSystemLoader
 import orm
 from coroweb import add_routes, add_static 
 
+from config import configs
+
+from handlers import cookie2user, COOKIE_NAME
+
 def init_jinja2(app, **kw):
     logging.info('init jinja2...')
     options = dict(
@@ -42,6 +46,30 @@ async def logger_factory(app, handler):
         logging.info('log: Request: %s %s' % (request.method, request.path))
         return (await handler(request))
     return logger
+
+async def auth_factory(app, handler):
+#async def auth_factory(app, RequestHandler(app, fn))
+#RequestHandler(request)时，先判断fn是否有request参数，如果有，再将request传入
+    
+    # 验证当前的user
+    async def auth(request):
+        logging.info('auth user: %s %s' % (request.method, request.path))
+        
+        request.__user__ = None
+        # 清除之前的user
+        cookie_str = request.cookies.get(COOKIE_NAME)
+        if cookie_str:
+            user = await cookie2user(cookie_str)
+            if user:
+                logging.info('set current user: %s' % user.email)
+                request.__user__ = user
+        
+        if request.path.startswith('/manage/') and (request.__user__ is None or not request.__user__.admin):
+            # 在path=/manage/的条件下，__user__为空 或者 __user__不是admin
+            # 登录具有admin权限的账户
+            return web.HTTPFound('/signin') 
+        return (await handler(request))
+    return auth
 
 async def response_factory(app, handler):
     # coroweb.add_route(method, path, RequestHandler(app, fn))中已经对fn进行装饰
@@ -71,6 +99,7 @@ async def response_factory(app, handler):
                 resp.content_type = 'application/json;charset=utf-8'
                 return resp
             else:
+                r['__user__'] = request.__user__
                 resp = web.Response(body=app['__templating__'].get_template(template).render(**r).encode('utf-8'))
                 resp.content_type = 'text/html;charset=utf-8'
                 return resp
@@ -101,7 +130,7 @@ def datetime_fileter(t):
 async def init(loop):
     await orm.create_pool(loop=loop, host='localhost', port=3306, user='www-data', password='www-data', db='awesome')
     app = web.Application(loop=loop, middlewares=[
-        logger_factory, response_factory
+        logger_factory, auth_factory, response_factory
     ])
     init_jinja2(app, filters=dict(datetime=datetime_fileter))
     add_routes(app, 'handlers')
